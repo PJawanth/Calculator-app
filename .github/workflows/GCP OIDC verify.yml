@@ -2,6 +2,9 @@ name: GCP OIDC Verify
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feature-google
 
 permissions:
   id-token: write
