@@ -123,7 +123,7 @@ jobs:
           echo "Proceeding with infrastructure creation..." >> $GITHUB_STEP_SUMMARY
 
   # ============================================================================
-  # Step 3: Create Infrastructure
+  # Step 3: Create Infrastructure (with State Check)
   # ============================================================================
   create-infra:
     name: 🏗️ Create Infrastructure
@@ -132,6 +132,7 @@ jobs:
     outputs:
       acr_login_server: ${{ steps.create-acr.outputs.login_server }}
       webapp_url: ${{ steps.create-webapp.outputs.url }}
+      created_resources: ${{ steps.state.outputs.created }}
 
     steps:
       - name: Checkout code
@@ -154,18 +155,55 @@ jobs:
           az provider register --namespace Microsoft.Resources --wait || true
           
           echo "✅ Resource providers registered"
+
+      - name: Check Existing Resources (State Check)
+        id: state
+        run: |
+          ACR_NAME="${{ needs.plan.outputs.acr_name }}"
           
-          # Verify registration status
-          echo "### 🔧 Resource Provider Status" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔍 Resource State Check" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Provider | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          for provider in Microsoft.ContainerRegistry Microsoft.Web Microsoft.Resources; do
-            STATUS=$(az provider show --namespace $provider --query "registrationState" -o tsv 2>/dev/null || echo "Unknown")
-            echo "| $provider | $STATUS |" >> $GITHUB_STEP_SUMMARY
-          done
+          echo "| Resource | Status | Action |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Check Resource Group
+          if az group show --name ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "rg_exists=true" >> $GITHUB_OUTPUT
+            echo "| Resource Group | ✅ Exists | Skip |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "rg_exists=false" >> $GITHUB_OUTPUT
+            echo "| Resource Group | ❌ Not Found | Create |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check ACR
+          if az acr show --name $ACR_NAME &>/dev/null; then
+            echo "acr_exists=true" >> $GITHUB_OUTPUT
+            echo "| Container Registry | ✅ Exists | Skip |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "acr_exists=false" >> $GITHUB_OUTPUT
+            echo "| Container Registry | ❌ Not Found | Create |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check App Service Plan
+          if az appservice plan show --name ${{ env.APP_PLAN }} --resource-group ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "plan_exists=true" >> $GITHUB_OUTPUT
+            echo "| App Service Plan | ✅ Exists | Skip |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "plan_exists=false" >> $GITHUB_OUTPUT
+            echo "| App Service Plan | ❌ Not Found | Create |" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Check Web App
+          if az webapp show --name ${{ env.WEBAPP_NAME }} --resource-group ${{ env.RESOURCE_GROUP }} &>/dev/null; then
+            echo "webapp_exists=true" >> $GITHUB_OUTPUT
+            echo "| Web App | ✅ Exists | Skip |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "webapp_exists=false" >> $GITHUB_OUTPUT
+            echo "| Web App | ❌ Not Found | Create |" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Create Resource Group
+        if: steps.state.outputs.rg_exists != 'true'
         run: |
           echo "📁 Creating Resource Group: ${{ env.RESOURCE_GROUP }}"
           az group create \
@@ -179,6 +217,7 @@ jobs:
 
       - name: Create Container Registry
         id: create-acr
+        if: steps.state.outputs.acr_exists != 'true'
         run: |
           ACR_NAME="${{ needs.plan.outputs.acr_name }}"
           echo "📦 Creating Container Registry: $ACR_NAME"
@@ -193,7 +232,16 @@ jobs:
           LOGIN_SERVER=$(az acr show --name $ACR_NAME --query loginServer -o tsv)
           echo "login_server=$LOGIN_SERVER" >> $GITHUB_OUTPUT
 
+      - name: Get ACR Login Server (if exists)
+        id: get-acr
+        if: steps.state.outputs.acr_exists == 'true'
+        run: |
+          ACR_NAME="${{ needs.plan.outputs.acr_name }}"
+          LOGIN_SERVER=$(az acr show --name $ACR_NAME --query loginServer -o tsv)
+          echo "login_server=$LOGIN_SERVER" >> $GITHUB_OUTPUT
+
       - name: Create App Service Plan
+        if: steps.state.outputs.plan_exists != 'true'
         run: |
           echo "📋 Creating App Service Plan: ${{ env.APP_PLAN }}"
           az appservice plan create \
@@ -206,6 +254,7 @@ jobs:
 
       - name: Create Web App for Containers
         id: create-webapp
+        if: steps.state.outputs.webapp_exists != 'true'
         run: |
           echo "🌐 Creating Web App: ${{ env.WEBAPP_NAME }}"
           az webapp create \
@@ -215,6 +264,12 @@ jobs:
             --container-image-name mcr.microsoft.com/appsvc/staticsite:latest \
             --tags Environment=${{ env.ENVIRONMENT }} Application=${{ env.APP_NAME }}
           
+          echo "url=https://${{ env.WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
+
+      - name: Get Web App URL (if exists)
+        id: get-webapp
+        if: steps.state.outputs.webapp_exists == 'true'
+        run: |
           echo "url=https://${{ env.WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
 
       - name: Configure Web App with ACR
