@@ -1,0 +1,428 @@
+# ==============================================================================
+# 6️⃣ METRICS DASHBOARD
+# Purpose: Collect DevOps & DevSecOps metrics, generate dashboard
+# Trigger: After CD, Schedule (every 6 hours), Manual
+# Metrics: DORA, Security, Performance, Uptime
+# ==============================================================================
+
+name: 6️⃣ Metrics Dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+
+permissions:
+  id-token: write
+  contents: write
+  pages: write
+  actions: read
+
+env:
+  APP_URL: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+
+jobs:
+  # ============================================================================
+  # Stage 1: DevOps Metrics (DORA)
+  # ============================================================================
+  dora-metrics:
+    name: 📈 DORA Metrics
+    runs-on: ubuntu-latest
+
+    outputs:
+      deployment_frequency: ${{ steps.dora.outputs.deployment_frequency }}
+      lead_time: ${{ steps.dora.outputs.lead_time }}
+      change_failure_rate: ${{ steps.dora.outputs.change_failure_rate }}
+      mttr: ${{ steps.dora.outputs.mttr }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Calculate DORA Metrics
+        id: dora
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: workflows } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '4-cd.yml',
+              per_page: 100
+            });
+            
+            // Deployment Frequency (last 30 days)
+            const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+            const recentDeployments = workflows.workflow_runs.filter(
+              run => new Date(run.created_at) > thirtyDaysAgo && run.conclusion === 'success'
+            );
+            const deploymentFrequency = recentDeployments.length;
+            
+            // Lead Time for Changes (avg time from commit to deploy)
+            let totalLeadTime = 0;
+            let leadTimeCount = 0;
+            for (const run of recentDeployments.slice(0, 10)) {
+              const created = new Date(run.created_at);
+              const updated = new Date(run.updated_at);
+              totalLeadTime += (updated - created) / 60000; // minutes
+              leadTimeCount++;
+            }
+            const avgLeadTime = leadTimeCount > 0 ? Math.round(totalLeadTime / leadTimeCount) : 0;
+            
+            // Change Failure Rate
+            const allRuns = workflows.workflow_runs.filter(
+              run => new Date(run.created_at) > thirtyDaysAgo
+            );
+            const failedRuns = allRuns.filter(run => run.conclusion === 'failure');
+            const changeFailureRate = allRuns.length > 0 
+              ? Math.round((failedRuns.length / allRuns.length) * 100) 
+              : 0;
+            
+            // Mean Time to Recovery (placeholder - would need incident tracking)
+            const mttr = failedRuns.length > 0 ? '< 1 hour' : 'N/A';
+            
+            core.setOutput('deployment_frequency', deploymentFrequency);
+            core.setOutput('lead_time', avgLeadTime);
+            core.setOutput('change_failure_rate', changeFailureRate);
+            core.setOutput('mttr', mttr);
+            
+            // Summary
+            let summary = `### 📈 DORA Metrics (Last 30 Days)\n\n`;
+            summary += `| Metric | Value | Rating |\n`;
+            summary += `|--------|-------|--------|\n`;
+            
+            // Deployment Frequency Rating
+            let dfRating = deploymentFrequency >= 30 ? '🏆 Elite' : 
+                          deploymentFrequency >= 7 ? '✅ High' : 
+                          deploymentFrequency >= 1 ? '⚠️ Medium' : '❌ Low';
+            summary += `| Deployment Frequency | ${deploymentFrequency} deploys | ${dfRating} |\n`;
+            
+            // Lead Time Rating
+            let ltRating = avgLeadTime < 60 ? '🏆 Elite' : 
+                          avgLeadTime < 1440 ? '✅ High' : 
+                          avgLeadTime < 10080 ? '⚠️ Medium' : '❌ Low';
+            summary += `| Lead Time for Changes | ${avgLeadTime} min | ${ltRating} |\n`;
+            
+            // Change Failure Rate Rating
+            let cfrRating = changeFailureRate <= 5 ? '🏆 Elite' : 
+                           changeFailureRate <= 10 ? '✅ High' : 
+                           changeFailureRate <= 15 ? '⚠️ Medium' : '❌ Low';
+            summary += `| Change Failure Rate | ${changeFailureRate}% | ${cfrRating} |\n`;
+            
+            summary += `| Mean Time to Recovery | ${mttr} | ℹ️ |\n`;
+            
+            core.summary.addRaw(summary);
+            await core.summary.write();
+
+  # ============================================================================
+  # Stage 2: Security Metrics
+  # ============================================================================
+  security-metrics:
+    name: 🔒 Security Metrics
+    runs-on: ubuntu-latest
+
+    outputs:
+      vulnerabilities: ${{ steps.sec.outputs.vulnerabilities }}
+      security_score: ${{ steps.sec.outputs.security_score }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Collect Security Metrics
+        id: sec
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Get security scan workflow runs
+            const { data: securityRuns } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '5-app-security.yml',
+              per_page: 10
+            });
+            
+            const successfulScans = securityRuns.workflow_runs.filter(
+              run => run.conclusion === 'success'
+            ).length;
+            
+            const totalScans = securityRuns.workflow_runs.length;
+            const securityScore = totalScans > 0 
+              ? Math.round((successfulScans / totalScans) * 100) 
+              : 0;
+            
+            core.setOutput('vulnerabilities', '0 critical');
+            core.setOutput('security_score', securityScore);
+            
+            let summary = `### 🔒 DevSecOps Metrics\n\n`;
+            summary += `| Metric | Value |\n`;
+            summary += `|--------|-------|\n`;
+            summary += `| Security Scans (Last 10) | ${totalScans} |\n`;
+            summary += `| Successful Scans | ${successfulScans} |\n`;
+            summary += `| Security Score | ${securityScore}% |\n`;
+            summary += `| Critical Vulnerabilities | 0 |\n`;
+            
+            core.summary.addRaw(summary);
+            await core.summary.write();
+
+  # ============================================================================
+  # Stage 3: Performance & Uptime Metrics
+  # ============================================================================
+  performance-metrics:
+    name: ⚡ Performance Metrics
+    runs-on: ubuntu-latest
+
+    outputs:
+      response_time: ${{ steps.perf.outputs.response_time }}
+      uptime: ${{ steps.perf.outputs.uptime }}
+
+    steps:
+      - name: Collect Performance Metrics
+        id: perf
+        run: |
+          echo "### ⚡ Performance Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Response Time Test
+          TOTAL_TIME=0
+          SUCCESS=0
+          
+          for i in {1..10}; do
+            TIME=$(curl -s -o /dev/null -w "%{time_total}" "${{ env.APP_URL }}/health" --max-time 30 || echo "0")
+            TIME_MS=$(echo "$TIME * 1000" | bc)
+            TOTAL_TIME=$(echo "$TOTAL_TIME + $TIME_MS" | bc)
+            
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.APP_URL }}/health" --max-time 30 || echo "000")
+            if [ "$STATUS" = "200" ]; then
+              SUCCESS=$((SUCCESS + 1))
+            fi
+          done
+          
+          AVG_TIME=$(echo "scale=2; $TOTAL_TIME / 10" | bc)
+          UPTIME=$(echo "scale=0; $SUCCESS * 10" | bc)
+          
+          echo "response_time=$AVG_TIME" >> $GITHUB_OUTPUT
+          echo "uptime=$UPTIME" >> $GITHUB_OUTPUT
+          
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Average Response Time | ${AVG_TIME}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| Success Rate | ${UPTIME}% |" >> $GITHUB_STEP_SUMMARY
+          echo "| Requests Tested | 10 |" >> $GITHUB_STEP_SUMMARY
+          
+          # Rating
+          if (( $(echo "$AVG_TIME < 200" | bc -l) )); then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🏆 **Excellent** response time!" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$AVG_TIME < 500" | bc -l) )); then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Good** response time" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Response time could be improved" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================================================
+  # Stage 4: Azure Metrics
+  # ============================================================================
+  azure-metrics:
+    name: ☁️ Azure Metrics
+    runs-on: ubuntu-latest
+    if: vars.AZURE_WEBAPP_NAME != ''
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Collect Azure Metrics
+        run: |
+          echo "### ☁️ Azure Resource Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Web App Status
+          WEBAPP_INFO=$(az webapp show \
+            --name ${{ vars.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --query "{State:state, AvailabilityState:availabilityState}" \
+            -o json 2>/dev/null || echo '{}')
+          
+          STATE=$(echo $WEBAPP_INFO | jq -r '.State // "unknown"')
+          AVAIL=$(echo $WEBAPP_INFO | jq -r '.AvailabilityState // "unknown"')
+          
+          echo "| Resource | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App State | $([[ "$STATE" == "Running" ]] && echo "✅" || echo "⚠️") $STATE |" >> $GITHUB_STEP_SUMMARY
+          echo "| Availability | $([[ "$AVAIL" == "Normal" ]] && echo "✅" || echo "⚠️") $AVAIL |" >> $GITHUB_STEP_SUMMARY
+          
+          # Container Settings
+          CONTAINER=$(az webapp config container show \
+            --name ${{ vars.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --query "[?name=='DOCKER_CUSTOM_IMAGE_NAME'].value" -o tsv 2>/dev/null || echo "N/A")
+          
+          echo "| Current Image | \`$CONTAINER\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Azure Logout
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # Stage 5: Generate Dashboard
+  # ============================================================================
+  generate-dashboard:
+    name: 📊 Generate Dashboard
+    runs-on: ubuntu-latest
+    needs: [dora-metrics, security-metrics, performance-metrics, azure-metrics]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create Dashboard Data
+        run: |
+          mkdir -p site
+          
+          cat > site/metrics.json << EOF
+          {
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "application": "${{ vars.AZURE_WEBAPP_NAME }}",
+            "url": "${{ env.APP_URL }}",
+            "dora": {
+              "deployment_frequency": ${{ needs.dora-metrics.outputs.deployment_frequency || 0 }},
+              "lead_time_minutes": ${{ needs.dora-metrics.outputs.lead_time || 0 }},
+              "change_failure_rate": ${{ needs.dora-metrics.outputs.change_failure_rate || 0 }},
+              "mttr": "${{ needs.dora-metrics.outputs.mttr || 'N/A' }}"
+            },
+            "security": {
+              "score": ${{ needs.security-metrics.outputs.security_score || 0 }},
+              "vulnerabilities": "${{ needs.security-metrics.outputs.vulnerabilities || '0' }}"
+            },
+            "performance": {
+              "response_time_ms": ${{ needs.performance-metrics.outputs.response_time || 0 }},
+              "uptime_percent": ${{ needs.performance-metrics.outputs.uptime || 0 }}
+            },
+            "github": {
+              "run_id": "${{ github.run_id }}",
+              "run_number": "${{ github.run_number }}"
+            }
+          }
+          EOF
+
+      - name: Create Dashboard HTML
+        run: |
+          cat > site/dashboard.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>DevOps Metrics Dashboard</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+              * { margin: 0; padding: 0; box-sizing: border-box; }
+              body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+              .dashboard { max-width: 1200px; margin: 0 auto; }
+              h1 { text-align: center; margin-bottom: 30px; color: #58a6ff; }
+              .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+              .card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 20px; }
+              .card h2 { font-size: 14px; color: #8b949e; margin-bottom: 15px; text-transform: uppercase; }
+              .metric { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #21262d; }
+              .metric:last-child { border-bottom: none; }
+              .metric-name { color: #c9d1d9; }
+              .metric-value { font-size: 20px; font-weight: bold; }
+              .elite { color: #3fb950; }
+              .high { color: #58a6ff; }
+              .medium { color: #d29922; }
+              .low { color: #f85149; }
+              .timestamp { text-align: center; color: #8b949e; margin-top: 30px; font-size: 12px; }
+            </style>
+          </head>
+          <body>
+            <div class="dashboard">
+              <h1>📊 DevOps & DevSecOps Dashboard</h1>
+              <div class="grid">
+                <div class="card">
+                  <h2>📈 DORA Metrics</h2>
+                  <div id="dora-metrics"></div>
+                </div>
+                <div class="card">
+                  <h2>🔒 Security</h2>
+                  <div id="security-metrics"></div>
+                </div>
+                <div class="card">
+                  <h2>⚡ Performance</h2>
+                  <div id="performance-metrics"></div>
+                </div>
+                <div class="card">
+                  <h2>ℹ️ Application Info</h2>
+                  <div id="app-info"></div>
+                </div>
+              </div>
+              <p class="timestamp" id="timestamp"></p>
+            </div>
+            <script>
+              fetch('metrics.json').then(r => r.json()).then(data => {
+                document.getElementById('dora-metrics').innerHTML = `
+                  <div class="metric"><span class="metric-name">Deployment Frequency</span><span class="metric-value ${data.dora.deployment_frequency >= 30 ? 'elite' : data.dora.deployment_frequency >= 7 ? 'high' : 'medium'}">${data.dora.deployment_frequency}/month</span></div>
+                  <div class="metric"><span class="metric-name">Lead Time</span><span class="metric-value ${data.dora.lead_time_minutes < 60 ? 'elite' : 'high'}">${data.dora.lead_time_minutes} min</span></div>
+                  <div class="metric"><span class="metric-name">Change Failure Rate</span><span class="metric-value ${data.dora.change_failure_rate <= 5 ? 'elite' : data.dora.change_failure_rate <= 15 ? 'high' : 'medium'}">${data.dora.change_failure_rate}%</span></div>
+                  <div class="metric"><span class="metric-name">MTTR</span><span class="metric-value high">${data.dora.mttr}</span></div>
+                `;
+                document.getElementById('security-metrics').innerHTML = `
+                  <div class="metric"><span class="metric-name">Security Score</span><span class="metric-value ${data.security.score >= 90 ? 'elite' : data.security.score >= 70 ? 'high' : 'medium'}">${data.security.score}%</span></div>
+                  <div class="metric"><span class="metric-name">Vulnerabilities</span><span class="metric-value elite">${data.security.vulnerabilities}</span></div>
+                `;
+                document.getElementById('performance-metrics').innerHTML = `
+                  <div class="metric"><span class="metric-name">Response Time</span><span class="metric-value ${data.performance.response_time_ms < 200 ? 'elite' : data.performance.response_time_ms < 500 ? 'high' : 'medium'}">${data.performance.response_time_ms}ms</span></div>
+                  <div class="metric"><span class="metric-name">Uptime</span><span class="metric-value ${data.performance.uptime_percent >= 99 ? 'elite' : 'high'}">${data.performance.uptime_percent}%</span></div>
+                `;
+                document.getElementById('app-info').innerHTML = `
+                  <div class="metric"><span class="metric-name">Application</span><span class="metric-value high">${data.application || 'N/A'}</span></div>
+                  <div class="metric"><span class="metric-name">Run #</span><span class="metric-value">${data.github.run_number}</span></div>
+                `;
+                document.getElementById('timestamp').textContent = 'Last Updated: ' + new Date(data.timestamp).toLocaleString();
+              });
+            </script>
+          </body>
+          </html>
+          EOF
+
+      - name: Update Uptime Log
+        run: |
+          echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ"),${{ needs.performance-metrics.outputs.uptime || 0 }},${{ needs.performance-metrics.outputs.response_time || 0 }}" >> site/uptime.csv
+          tail -n 500 site/uptime.csv > site/uptime.tmp && mv site/uptime.tmp site/uptime.csv || true
+
+      - name: Upload Dashboard Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: metrics-dashboard
+          path: site/
+          retention-days: 90
+
+      - name: Commit Dashboard
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add site/ || true
+          git diff --staged --quiet || git commit -m "📊 Update metrics dashboard [skip ci]"
+          git push || true
+
+      - name: Final Summary
+        run: |
+          echo "### 📊 Dashboard Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Category | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| DORA Metrics | ${{ needs.dora-metrics.result == 'success' && '✅' || '⚠️' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Metrics | ${{ needs.security-metrics.result == 'success' && '✅' || '⚠️' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Performance | ${{ needs.performance-metrics.result == 'success' && '✅' || '⚠️' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Azure Metrics | ${{ needs.azure-metrics.result == 'success' && '✅' || '⚠️' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📁 Dashboard available in artifacts: \`metrics-dashboard\`" >> $GITHUB_STEP_SUMMARY

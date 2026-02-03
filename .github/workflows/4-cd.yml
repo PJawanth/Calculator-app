@@ -1,0 +1,331 @@
+# ==============================================================================
+# 4️⃣ CD - CONTINUOUS DEPLOYMENT
+# Purpose: Build, Push to ACR, Deploy to Azure Web App
+# Trigger: Push to main (after CI), Manual
+# Approvals: Required before deployment
+# ==============================================================================
+
+name: 4️⃣ CD - Deploy Application
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/workflows/5-*'
+      - '.github/workflows/6-*'
+  workflow_dispatch:
+    inputs:
+      skip_approval:
+        description: 'Skip approval (emergency deploy)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+  actions: write
+
+env:
+  PYTHON_VERSION: "3.11"
+  DOCKER_IMAGE_NAME: ${{ vars.AZURE_WEBAPP_NAME || 'calculator-app' }}
+
+jobs:
+  # ============================================================================
+  # Stage 1: Pre-flight Checks
+  # ============================================================================
+  preflight:
+    name: ✈️ Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+
+    steps:
+      - name: Check required variables
+        id: check
+        run: |
+          MISSING=""
+          
+          if [ -z "${{ vars.AZURE_ACR_NAME }}" ]; then
+            MISSING="${MISSING}AZURE_ACR_NAME, "
+          fi
+          if [ -z "${{ vars.AZURE_WEBAPP_NAME }}" ]; then
+            MISSING="${MISSING}AZURE_WEBAPP_NAME, "
+          fi
+          if [ -z "${{ vars.AZURE_RESOURCE_GROUP }}" ]; then
+            MISSING="${MISSING}AZURE_RESOURCE_GROUP, "
+          fi
+          
+          if [ -n "$MISSING" ]; then
+            echo "❌ Missing variables: $MISSING" >> $GITHUB_STEP_SUMMARY
+            echo "Please run \`3️⃣ Infrastructure Setup\` first!" >> $GITHUB_STEP_SUMMARY
+            echo "ready=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ All required variables present" >> $GITHUB_STEP_SUMMARY
+          echo "ready=true" >> $GITHUB_OUTPUT
+
+  # ============================================================================
+  # Stage 2: Run Tests
+  # ============================================================================
+  test:
+    name: 🧪 Run Tests
+    runs-on: ubuntu-latest
+    needs: preflight
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # ============================================================================
+  # Stage 3: Build Docker Image
+  # ============================================================================
+  build:
+    name: 🐳 Build & Push Image
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image-tag: ${{ github.run_number }}
+      image-sha: ${{ github.sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ vars.AZURE_ACR_NAME }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:latest
+            ${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:${{ github.run_number }}
+            ${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:${{ github.run_number }}'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Build Summary
+        run: |
+          echo "### 🐳 Docker Image Built" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | \`${{ vars.AZURE_ACR_NAME }}.azurecr.io\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ env.DOCKER_IMAGE_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ github.run_number }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Azure Logout
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # Stage 4: Deployment Approval
+  # ============================================================================
+  approve-deploy:
+    name: ⏳ Deployment Approval
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ inputs.skip_approval != true }}
+    environment:
+      name: production-deploy
+
+    steps:
+      - name: Approval received
+        run: |
+          echo "### ✅ Deployment Approved" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Approved by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image Version:** ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Stage 5: Deploy to Azure
+  # ============================================================================
+  deploy:
+    name: 🚀 Deploy to Azure
+    runs-on: ubuntu-latest
+    needs: [build, approve-deploy]
+    if: always() && needs.build.result == 'success' && (needs.approve-deploy.result == 'success' || needs.approve-deploy.result == 'skipped')
+    outputs:
+      app-url: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          images: ${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:${{ github.run_number }}
+
+      - name: Update App Settings
+        run: |
+          az webapp config appsettings set \
+            --name ${{ vars.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --settings \
+              DEPLOYMENT_VERSION=${{ github.run_number }} \
+              DEPLOYMENT_SHA=${{ github.sha }} \
+              DEPLOYMENT_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+      - name: Wait for deployment
+        run: sleep 60
+
+      - name: Health Check
+        id: health
+        run: |
+          APP_URL="https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net"
+          
+          echo "### 🏥 Health Check" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          for i in {1..12}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$APP_URL/health" --max-time 10 || echo "000")
+            
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "✅ Health check passed on attempt $i!" >> $GITHUB_STEP_SUMMARY
+              echo "status=success" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            echo "Attempt $i/12: HTTP $HTTP_STATUS" >> $GITHUB_STEP_SUMMARY
+            sleep 10
+          done
+          
+          echo "❌ Health check failed" >> $GITHUB_STEP_SUMMARY
+          echo "status=failed" >> $GITHUB_OUTPUT
+          exit 1
+
+      - name: Deployment Summary
+        if: success()
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎉 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| App URL | https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net |" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | \`${{ github.run_number }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Azure Logout
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # Stage 6: Rollback (on failure)
+  # ============================================================================
+  rollback:
+    name: ⏪ Rollback
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: failure()
+
+    steps:
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Rollback to previous version
+        run: |
+          PREV_VERSION=$((${{ github.run_number }} - 1))
+          
+          echo "### ⏪ Rolling back to version $PREV_VERSION" >> $GITHUB_STEP_SUMMARY
+          
+          az webapp config container set \
+            --name ${{ vars.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }} \
+            --container-image-name "${{ vars.AZURE_ACR_NAME }}.azurecr.io/${{ env.DOCKER_IMAGE_NAME }}:$PREV_VERSION"
+          
+          az webapp restart \
+            --name ${{ vars.AZURE_WEBAPP_NAME }} \
+            --resource-group ${{ vars.AZURE_RESOURCE_GROUP }}
+
+      - name: Azure Logout
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # Stage 7: Trigger Security & Metrics
+  # ============================================================================
+  trigger-post-deploy:
+    name: 🔄 Trigger Post-Deploy
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: success()
+
+    steps:
+      - name: Trigger App Security Scan
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Trigger security scan
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '5-app-security.yml',
+              ref: context.ref
+            });
+            
+            // Trigger metrics collection
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: '6-metrics-dashboard.yml',
+              ref: context.ref
+            });
+
+      - name: Next Steps
+        run: |
+          echo "### ➡️ Post-Deployment Actions Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔒 App Security Scan started" >> $GITHUB_STEP_SUMMARY
+          echo "- 📊 Metrics Dashboard update started" >> $GITHUB_STEP_SUMMARY

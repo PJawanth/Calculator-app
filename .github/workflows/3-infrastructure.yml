@@ -1,0 +1,285 @@
+# ==============================================================================
+# 3️⃣ INFRASTRUCTURE SETUP
+# Purpose: Create all Azure resources with simple UI inputs
+# Trigger: Manual - Run after CI passes
+# Approval: Required before creating resources
+# ==============================================================================
+
+name: 3️⃣ Infrastructure Setup
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_name:
+        description: '📛 Application Name (lowercase, no spaces)'
+        required: true
+        default: 'calculator'
+        type: string
+      environment:
+        description: '🌍 Environment'
+        required: true
+        default: 'prod'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      location:
+        description: '📍 Azure Region'
+        required: true
+        default: 'centralindia'
+        type: choice
+        options:
+          - centralindia
+          - eastus
+          - eastus2
+          - westus2
+          - westeurope
+          - northeurope
+          - southeastasia
+          - australiaeast
+          - uksouth
+      app_plan_sku:
+        description: '💰 App Service Plan (F1=Free, B1=Basic, S1=Standard)'
+        required: true
+        default: 'B1'
+        type: choice
+        options:
+          - F1
+          - B1
+          - B2
+          - S1
+          - S2
+          - P1v2
+
+permissions:
+  id-token: write
+  contents: write
+  actions: write
+
+env:
+  APP_NAME: ${{ inputs.app_name }}
+  ENVIRONMENT: ${{ inputs.environment }}
+  LOCATION: ${{ inputs.location }}
+  SKU: ${{ inputs.app_plan_sku }}
+  # Derived names
+  RESOURCE_GROUP: ${{ inputs.app_name }}-${{ inputs.environment }}-rg
+  ACR_NAME: ${{ inputs.app_name }}${{ inputs.environment }}acr
+  WEBAPP_NAME: ${{ inputs.app_name }}-${{ inputs.environment }}-app
+  APP_PLAN: ${{ inputs.app_name }}-${{ inputs.environment }}-plan
+
+jobs:
+  # ============================================================================
+  # Step 1: Validate & Plan
+  # ============================================================================
+  plan:
+    name: 📋 Validate & Plan
+    runs-on: ubuntu-latest
+    outputs:
+      resource_group: ${{ env.RESOURCE_GROUP }}
+      acr_name: ${{ steps.validate.outputs.acr_name }}
+      webapp_name: ${{ env.WEBAPP_NAME }}
+      proceed: ${{ steps.validate.outputs.proceed }}
+
+    steps:
+      - name: Validate inputs
+        id: validate
+        run: |
+          # Clean ACR name (remove hyphens, lowercase only)
+          ACR_CLEAN=$(echo "${{ env.ACR_NAME }}" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          echo "acr_name=$ACR_CLEAN" >> $GITHUB_OUTPUT
+          
+          echo "### 📋 Infrastructure Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following resources will be created:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Name | Location |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | \`${{ env.RESOURCE_GROUP }}\` | ${{ env.LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Registry | \`${ACR_CLEAN}\` | ${{ env.LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| App Service Plan | \`${{ env.APP_PLAN }}\` (${{ env.SKU }}) | ${{ env.LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App | \`${{ env.WEBAPP_NAME }}\` | ${{ env.LOCATION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Estimated URL:** \`https://${{ env.WEBAPP_NAME }}.azurewebsites.net\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "proceed=true" >> $GITHUB_OUTPUT
+
+  # ============================================================================
+  # Step 2: Approval Gate
+  # ============================================================================
+  approve-infra:
+    name: ⏳ Approval Required
+    runs-on: ubuntu-latest
+    needs: plan
+    environment: 
+      name: infrastructure-approval
+
+    steps:
+      - name: Approval received
+        run: |
+          echo "### ✅ Infrastructure Approved" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Approved by: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "Proceeding with infrastructure creation..." >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Step 3: Create Infrastructure
+  # ============================================================================
+  create-infra:
+    name: 🏗️ Create Infrastructure
+    runs-on: ubuntu-latest
+    needs: [plan, approve-infra]
+    outputs:
+      acr_login_server: ${{ steps.create-acr.outputs.login_server }}
+      webapp_url: ${{ steps.create-webapp.outputs.url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create Resource Group
+        run: |
+          echo "📁 Creating Resource Group: ${{ env.RESOURCE_GROUP }}"
+          az group create \
+            --name ${{ env.RESOURCE_GROUP }} \
+            --location ${{ env.LOCATION }} \
+            --tags \
+              Environment=${{ env.ENVIRONMENT }} \
+              Application=${{ env.APP_NAME }} \
+              ManagedBy=GitHubActions \
+              CreatedAt=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+      - name: Create Container Registry
+        id: create-acr
+        run: |
+          ACR_NAME="${{ needs.plan.outputs.acr_name }}"
+          echo "📦 Creating Container Registry: $ACR_NAME"
+          
+          az acr create \
+            --name $ACR_NAME \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --sku Basic \
+            --admin-enabled true \
+            --tags Environment=${{ env.ENVIRONMENT }} Application=${{ env.APP_NAME }}
+          
+          LOGIN_SERVER=$(az acr show --name $ACR_NAME --query loginServer -o tsv)
+          echo "login_server=$LOGIN_SERVER" >> $GITHUB_OUTPUT
+
+      - name: Create App Service Plan
+        run: |
+          echo "📋 Creating App Service Plan: ${{ env.APP_PLAN }}"
+          az appservice plan create \
+            --name ${{ env.APP_PLAN }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --location ${{ env.LOCATION }} \
+            --is-linux \
+            --sku ${{ env.SKU }} \
+            --tags Environment=${{ env.ENVIRONMENT }} Application=${{ env.APP_NAME }}
+
+      - name: Create Web App for Containers
+        id: create-webapp
+        run: |
+          echo "🌐 Creating Web App: ${{ env.WEBAPP_NAME }}"
+          az webapp create \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --plan ${{ env.APP_PLAN }} \
+            --container-image-name mcr.microsoft.com/appsvc/staticsite:latest \
+            --tags Environment=${{ env.ENVIRONMENT }} Application=${{ env.APP_NAME }}
+          
+          echo "url=https://${{ env.WEBAPP_NAME }}.azurewebsites.net" >> $GITHUB_OUTPUT
+
+      - name: Configure Web App with ACR
+        run: |
+          ACR_NAME="${{ needs.plan.outputs.acr_name }}"
+          
+          echo "🔗 Configuring Web App to use ACR"
+          ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
+          
+          az webapp config container set \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --container-image-name "$ACR_NAME.azurecr.io/${{ env.APP_NAME }}:latest" \
+            --container-registry-url "https://$ACR_NAME.azurecr.io" \
+            --container-registry-user $ACR_NAME \
+            --container-registry-password "$ACR_PASSWORD"
+
+      - name: Configure Web App Settings
+        run: |
+          echo "⚙️ Configuring Web App settings"
+          az webapp config appsettings set \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --settings \
+              WEBSITES_PORT=8000 \
+              DOCKER_ENABLE_CI=true \
+              ENVIRONMENT=${{ env.ENVIRONMENT }}
+
+      - name: Enable Managed Identity & ACR Access
+        run: |
+          ACR_NAME="${{ needs.plan.outputs.acr_name }}"
+          
+          echo "🔐 Enabling Managed Identity"
+          az webapp identity assign \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }}
+          
+          PRINCIPAL_ID=$(az webapp identity show \
+            --name ${{ env.WEBAPP_NAME }} \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --query principalId -o tsv)
+          
+          ACR_ID=$(az acr show --name $ACR_NAME --query id -o tsv)
+          
+          az role assignment create \
+            --assignee $PRINCIPAL_ID \
+            --role AcrPull \
+            --scope $ACR_ID || true
+
+      - name: Azure Logout
+        if: always()
+        run: az logout
+
+  # ============================================================================
+  # Step 4: Save Configuration & Trigger CD
+  # ============================================================================
+  save-config:
+    name: 💾 Save Configuration
+    runs-on: ubuntu-latest
+    needs: [plan, create-infra]
+
+    steps:
+      - name: Summary
+        run: |
+          echo "### 🎉 Infrastructure Created Successfully!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Container Registry | \`${{ needs.plan.outputs.acr_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App | \`${{ env.WEBAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| App URL | ${{ needs.create-infra.outputs.webapp_url }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Required GitHub Variables" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Add these in **Settings → Secrets → Variables → Actions**:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Variable | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_RESOURCE_GROUP\` | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_ACR_NAME\` | \`${{ needs.plan.outputs.acr_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_WEBAPP_NAME\` | \`${{ env.WEBAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "### ➡️ Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. ✅ Add the GitHub Variables above" >> $GITHUB_STEP_SUMMARY
+          echo "2. ➡️ Run \`4️⃣ CD - Deploy Application\` workflow" >> $GITHUB_STEP_SUMMARY

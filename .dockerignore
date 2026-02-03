@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+ENV
+
+# Testing
+.pytest_cache
+.coverage
+htmlcov
+tests/
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build
+*.egg-info
+dist
+build
+
+# Docs
+*.md
+LICENSE
+
+# CI/CD
+.github
+
+# Local config
+*.env
+.env.*
+
+# Infrastructure
+infra/
+
+# Metrics dashboard
+metrics/
+site/

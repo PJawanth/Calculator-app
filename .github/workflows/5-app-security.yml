@@ -1,0 +1,261 @@
+# ==============================================================================
+# 5️⃣ APP SECURITY (DAST)
+# Purpose: Dynamic Application Security Testing on deployed app
+# Trigger: After CD deployment, Schedule, Manual
+# Includes: OWASP ZAP, SSL/TLS, API Security, Rate Limiting
+# ==============================================================================
+
+name: 5️⃣ App Security Scan
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run every Wednesday at 3 AM UTC
+    - cron: '0 3 * * 3'
+
+permissions:
+  contents: read
+  security-events: write
+
+env:
+  APP_URL: https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net
+
+jobs:
+  # ============================================================================
+  # Stage 1: Security Approval
+  # ============================================================================
+  approve-scan:
+    name: ⏳ Security Scan Approval
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: security-scan
+
+    steps:
+      - name: Approval received
+        run: echo "Security scan approved by ${{ github.actor }}"
+
+  # ============================================================================
+  # Stage 2: API Security Testing
+  # ============================================================================
+  api-security:
+    name: 🔌 API Security
+    runs-on: ubuntu-latest
+    needs: approve-scan
+    if: always() && (needs.approve-scan.result == 'success' || needs.approve-scan.result == 'skipped')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Wait for app readiness
+        run: |
+          echo "Checking app availability..."
+          for i in {1..10}; do
+            if curl -s -o /dev/null -w "%{http_code}" "${{ env.APP_URL }}/health" | grep -q "200"; then
+              echo "✅ App is ready!"
+              exit 0
+            fi
+            echo "Attempt $i/10..."
+            sleep 10
+          done
+          echo "⚠️ App may not be fully ready"
+
+      - name: Security Headers Analysis
+        run: |
+          echo "### 🔒 Security Headers Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          HEADERS=$(curl -s -I "${{ env.APP_URL }}" --max-time 30)
+          
+          echo "| Header | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          check_header() {
+            if echo "$HEADERS" | grep -qi "$1"; then
+              echo "| \`$1\` | ✅ Present |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| \`$1\` | ⚠️ Missing |" >> $GITHUB_STEP_SUMMARY
+            fi
+          }
+          
+          check_header "X-Content-Type-Options"
+          check_header "X-Frame-Options"
+          check_header "Strict-Transport-Security"
+          check_header "Content-Security-Policy"
+          check_header "X-XSS-Protection"
+
+      - name: API Endpoint Testing
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔌 API Endpoint Security" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Test | Endpoint | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          
+          # Test valid request
+          RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ env.APP_URL }}/add" \
+            -H "Content-Type: application/json" -d '{"a":5,"b":3}')
+          echo "| Valid Input | /add | $([[ "$RESP" == "200" ]] && echo "✅" || echo "❌") $RESP |" >> $GITHUB_STEP_SUMMARY
+          
+          # Test SQL injection
+          RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ env.APP_URL }}/add" \
+            -H "Content-Type: application/json" -d '{"a":"1;DROP TABLE--","b":3}')
+          echo "| SQL Injection | /add | $([[ "$RESP" == "422" ]] && echo "✅ Blocked" || echo "⚠️") $RESP |" >> $GITHUB_STEP_SUMMARY
+          
+          # Test XSS
+          RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ env.APP_URL }}/add" \
+            -H "Content-Type: application/json" -d '{"a":"<script>","b":3}')
+          echo "| XSS Attempt | /add | $([[ "$RESP" == "422" ]] && echo "✅ Blocked" || echo "⚠️") $RESP |" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================================================
+  # Stage 3: OWASP ZAP Scan
+  # ============================================================================
+  zap-scan:
+    name: 🕷️ OWASP ZAP Scan
+    runs-on: ubuntu-latest
+    needs: approve-scan
+    if: always() && (needs.approve-scan.result == 'success' || needs.approve-scan.result == 'skipped')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create ZAP rules file
+        run: |
+          mkdir -p .zap
+          cat > .zap/rules.tsv << 'EOF'
+          10015	IGNORE	Incomplete or No Cache-control
+          10017	IGNORE	Cross-Domain JavaScript
+          10027	WARN	Information Disclosure - Suspicious Comments
+          10035	WARN	Strict-Transport-Security Header
+          10038	WARN	Content Security Policy Header Not Set
+          EOF
+
+      - name: OWASP ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ env.APP_URL }}
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a -j'
+          allow_issue_writing: false
+        continue-on-error: true
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-security-report
+          path: report_html.html
+          retention-days: 30
+        if: always()
+
+  # ============================================================================
+  # Stage 4: SSL/TLS Security
+  # ============================================================================
+  ssl-security:
+    name: 🔐 SSL/TLS Check
+    runs-on: ubuntu-latest
+    needs: approve-scan
+    if: always() && (needs.approve-scan.result == 'success' || needs.approve-scan.result == 'skipped')
+
+    steps:
+      - name: SSL Certificate Check
+        run: |
+          DOMAIN=$(echo "${{ env.APP_URL }}" | sed 's|https://||' | sed 's|/.*||')
+          
+          echo "### 🔐 SSL/TLS Analysis" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Domain:** \`$DOMAIN\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Get certificate info
+          CERT_INFO=$(echo | openssl s_client -servername $DOMAIN -connect $DOMAIN:443 2>/dev/null | openssl x509 -noout -dates -subject 2>/dev/null || echo "Could not fetch")
+          
+          echo "#### Certificate Details" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "$CERT_INFO" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          # Check expiry
+          EXPIRY=$(echo | openssl s_client -servername $DOMAIN -connect $DOMAIN:443 2>/dev/null | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+          if [ -n "$EXPIRY" ]; then
+            EXPIRY_EPOCH=$(date -d "$EXPIRY" +%s 2>/dev/null || echo "0")
+            NOW_EPOCH=$(date +%s)
+            DAYS_LEFT=$(( ($EXPIRY_EPOCH - $NOW_EPOCH) / 86400 ))
+            
+            echo "" >> $GITHUB_STEP_SUMMARY
+            if [ $DAYS_LEFT -gt 30 ]; then
+              echo "✅ Certificate valid for $DAYS_LEFT days" >> $GITHUB_STEP_SUMMARY
+            elif [ $DAYS_LEFT -gt 0 ]; then
+              echo "⚠️ Certificate expires in $DAYS_LEFT days!" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ Certificate expired!" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+  # ============================================================================
+  # Stage 5: Rate Limiting Test
+  # ============================================================================
+  rate-limiting:
+    name: ⏱️ Rate Limiting
+    runs-on: ubuntu-latest
+    needs: approve-scan
+    if: always() && (needs.approve-scan.result == 'success' || needs.approve-scan.result == 'skipped')
+
+    steps:
+      - name: Rate Limiting Test
+        run: |
+          echo "### ⏱️ Rate Limiting Test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          SUCCESS=0
+          RATE_LIMITED=0
+          FAILED=0
+          
+          for i in {1..100}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${{ env.APP_URL }}/health" --max-time 5 || echo "000")
+            case $STATUS in
+              200) SUCCESS=$((SUCCESS + 1)) ;;
+              429) RATE_LIMITED=$((RATE_LIMITED + 1)) ;;
+              *) FAILED=$((FAILED + 1)) ;;
+            esac
+          done
+          
+          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Successful (200) | $SUCCESS |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🛑 Rate Limited (429) | $RATE_LIMITED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ $RATE_LIMITED -gt 0 ]; then
+            echo "✅ Rate limiting is active!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No rate limiting detected (may be configured at infrastructure level)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================================================
+  # Security Summary
+  # ============================================================================
+  security-summary:
+    name: 📊 Security Summary
+    runs-on: ubuntu-latest
+    needs: [api-security, zap-scan, ssl-security, rate-limiting]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "### 🔒 Application Security Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Target:** \`${{ env.APP_URL }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Scan Date:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Security Test | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔌 API Security | ${{ needs.api-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🕷️ OWASP ZAP | ${{ needs.zap-scan.result == 'success' && '✅ Passed' || '⚠️ Review' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🔐 SSL/TLS | ${{ needs.ssl-security.result == 'success' && '✅ Passed' || '⚠️ Review' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏱️ Rate Limiting | ${{ needs.rate-limiting.result == 'success' && '✅ Tested' || '⚠️ Review' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📁 Check artifacts for detailed reports" >> $GITHUB_STEP_SUMMARY
