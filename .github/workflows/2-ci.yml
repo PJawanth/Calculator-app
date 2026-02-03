@@ -140,7 +140,7 @@ jobs:
 
       - name: Install security tools
         run: |
-          pip install bandit safety pip-audit semgrep
+          pip install bandit safety pip-audit
 
       - name: Run Bandit (SAST)
         continue-on-error: true
@@ -160,9 +160,10 @@ jobs:
           pip-audit -r requirements.txt || true
 
       - name: Run Semgrep
+        uses: returntocorp/semgrep-action@v1
         continue-on-error: true
-        run: |
-          semgrep scan --config auto app/ || true
+        with:
+          config: auto
 
       - name: Secret Scanning (Gitleaks)
         continue-on-error: true
