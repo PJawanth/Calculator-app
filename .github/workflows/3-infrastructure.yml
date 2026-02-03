@@ -76,9 +76,10 @@ jobs:
     name: 📋 Validate & Plan
     runs-on: ubuntu-latest
     outputs:
-      resource_group: ${{ env.RESOURCE_GROUP }}
+      resource_group: ${{ steps.validate.outputs.resource_group }}
       acr_name: ${{ steps.validate.outputs.acr_name }}
-      webapp_name: ${{ env.WEBAPP_NAME }}
+      webapp_name: ${{ steps.validate.outputs.webapp_name }}
+      location: ${{ steps.validate.outputs.location }}
       proceed: ${{ steps.validate.outputs.proceed }}
 
     steps:
@@ -87,7 +88,13 @@ jobs:
         run: |
           # Clean ACR name (remove hyphens, lowercase only)
           ACR_CLEAN=$(echo "${{ env.ACR_NAME }}" | tr -d '-' | tr '[:upper:]' '[:lower:]')
+          
+          # Set all outputs
           echo "acr_name=$ACR_CLEAN" >> $GITHUB_OUTPUT
+          echo "resource_group=${{ env.RESOURCE_GROUP }}" >> $GITHUB_OUTPUT
+          echo "webapp_name=${{ env.WEBAPP_NAME }}" >> $GITHUB_OUTPUT
+          echo "location=${{ env.LOCATION }}" >> $GITHUB_OUTPUT
+          echo "proceed=true" >> $GITHUB_OUTPUT
           
           echo "### 📋 Infrastructure Plan" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -335,15 +342,19 @@ jobs:
       - name: Create GitHub Variables
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const variables = [
-              { name: 'AZURE_RESOURCE_GROUP', value: '${{ env.RESOURCE_GROUP }}' },
+              { name: 'AZURE_RESOURCE_GROUP', value: '${{ needs.plan.outputs.resource_group }}' },
               { name: 'AZURE_ACR_NAME', value: '${{ needs.plan.outputs.acr_name }}' },
-              { name: 'AZURE_WEBAPP_NAME', value: '${{ env.WEBAPP_NAME }}' },
-              { name: 'AZURE_LOCATION', value: '${{ env.LOCATION }}' }
+              { name: 'AZURE_WEBAPP_NAME', value: '${{ needs.plan.outputs.webapp_name }}' },
+              { name: 'AZURE_LOCATION', value: '${{ needs.plan.outputs.location }}' }
             ];
             
+            console.log('Creating/updating GitHub repository variables...');
+            
             for (const variable of variables) {
+              console.log(`Setting ${variable.name} = ${variable.value}`);
               try {
                 // Try to update existing variable
                 await github.rest.actions.updateRepoVariable({
@@ -356,13 +367,17 @@ jobs:
               } catch (error) {
                 if (error.status === 404) {
                   // Variable doesn't exist, create it
-                  await github.rest.actions.createRepoVariable({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name: variable.name,
-                    value: variable.value
-                  });
-                  console.log(`✅ Created variable: ${variable.name}`);
+                  try {
+                    await github.rest.actions.createRepoVariable({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: variable.name,
+                      value: variable.value
+                    });
+                    console.log(`✅ Created variable: ${variable.name}`);
+                  } catch (createError) {
+                    console.log(`❌ Failed to create ${variable.name}: ${createError.message}`);
+                  }
                 } else {
                   console.log(`❌ Failed to set ${variable.name}: ${error.message}`);
                 }
@@ -375,9 +390,9 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Resource Group | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | \`${{ needs.plan.outputs.resource_group }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Container Registry | \`${{ needs.plan.outputs.acr_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Web App | \`${{ env.WEBAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Web App | \`${{ needs.plan.outputs.webapp_name }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| App URL | ${{ needs.create-infra.outputs.webapp_url }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
@@ -387,10 +402,10 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Variable | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`AZURE_RESOURCE_GROUP\` | \`${{ env.RESOURCE_GROUP }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_RESOURCE_GROUP\` | \`${{ needs.plan.outputs.resource_group }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "| \`AZURE_ACR_NAME\` | \`${{ needs.plan.outputs.acr_name }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`AZURE_WEBAPP_NAME\` | \`${{ env.WEBAPP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`AZURE_LOCATION\` | \`${{ env.LOCATION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_WEBAPP_NAME\` | \`${{ needs.plan.outputs.webapp_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`AZURE_LOCATION\` | \`${{ needs.plan.outputs.location }}\` |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "### ➡️ Next Steps" >> $GITHUB_STEP_SUMMARY
