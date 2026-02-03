@@ -1,25 +1,24 @@
 # ==============================================================================
 # 2️⃣ CI - CONTINUOUS INTEGRATION
 # Purpose: Lint, Test, Security Scan, Build Verification
-# Trigger: Push/PR, or triggered from OIDC workflow
-# Includes: Security scanning as part of CI
+# Trigger: Manual or Pull Request only (NO auto-trigger on push)
+# Flow: OIDC ✓ → [Manual] CI → [Manual] Infrastructure
 # ==============================================================================
 
 name: 2️⃣ CI - Build & Test
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-      - 'feature/**'
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
+  # Only trigger on PR or manual - NO push trigger
   pull_request:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      run_security_scan:
+        description: 'Run security scanning'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read

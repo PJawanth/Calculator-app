@@ -1,21 +1,14 @@
 # ==============================================================================
 # 4️⃣ CD - CONTINUOUS DEPLOYMENT
 # Purpose: Build, Push to ACR, Deploy to Azure Web App
-# Trigger: Push to main (after CI), Manual
-# Approvals: Required before deployment
+# Trigger: Manual only (NO auto-trigger on push)
+# Flow: Infrastructure ✓ → [Manual] CD → [Manual] Security
 # ==============================================================================
 
 name: 4️⃣ CD - Deploy Application
 
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/workflows/5-*'
-      - '.github/workflows/6-*'
+  # Manual trigger only - NO push trigger
   workflow_dispatch:
     inputs:
       skip_approval:
@@ -335,36 +328,26 @@ jobs:
   # ============================================================================
   # Stage 7: Trigger Security & Metrics
   # ============================================================================
-  trigger-post-deploy:
-    name: 🔄 Trigger Post-Deploy
+  # Stage 7: Next Steps (Manual trigger info)
+  # ============================================================================
+  next-steps:
+    name: ➡️ Next Steps
     runs-on: ubuntu-latest
     needs: deploy
     if: success()
 
     steps:
-      - name: Trigger App Security Scan
-        uses: actions/github-script@v7
-        with:
-          script: |
-            // Trigger security scan
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '5-app-security.yml',
-              ref: context.ref
-            });
-            
-            // Trigger metrics collection
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: '6-metrics-dashboard.yml',
-              ref: context.ref
-            });
-
-      - name: Next Steps
+      - name: Show Next Steps
         run: |
-          echo "### ➡️ Post-Deployment Actions Triggered" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Deployment Complete!" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔒 App Security Scan started" >> $GITHUB_STEP_SUMMARY
-          echo "- 📊 Metrics Dashboard update started" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ➡️ Next Steps (Manual)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Step | Workflow | Action |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 1 | **5️⃣ App Security Scan** | Run to test deployed app security |" >> $GITHUB_STEP_SUMMARY
+          echo "| 2 | **6️⃣ Metrics Dashboard** | Run to collect DevOps metrics |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Go to **Actions** tab and manually run these workflows when ready." >> $GITHUB_STEP_SUMMARY
